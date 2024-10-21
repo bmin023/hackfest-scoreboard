@@ -1,0 +1,9 @@
+flagtwo: 
+  check: cat flag1.txt
+  points: 1
+flagone: 
+  check: cat flag2.txt
+  points: 2
+flagthree: 
+  check: cat flag3.txt
+  points: 3
