@@ -4,6 +4,7 @@ use prometheus::Encoder;
 use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder};
 use serde::Deserialize;
 use serde_yaml;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use std::collections::HashMap;
 use std::fs::File;
@@ -21,8 +22,9 @@ async fn main() -> Result<()> {
 
     let team_flags = IntGaugeVec::new(
         Opts::new("team_flags", "How many flags does each team have"),
-        &["team_name", "difficulty"]
-    ).unwrap();
+        &["team_name", "difficulty"],
+    )
+    .unwrap();
 
     let r = Registry::new();
     r.register(Box::new(team_points.clone())).unwrap();
@@ -34,23 +36,43 @@ async fn main() -> Result<()> {
             Arc::new(serde_yaml::from_reader(File::open("teams.yaml").unwrap()).unwrap());
         let checks: Arc<HashMap<String, Check>> =
             Arc::new(serde_yaml::from_reader(File::open("checks.yaml").unwrap()).unwrap());
+        let total_flags = checks.iter().fold(HashMap::new(), |mut m, (_, check)| {
+            m.entry(check.difficulty.clone())
+                .and_modify(|v| *v += 1)
+                .or_insert(1i64);
+            m
+        }).into_iter().collect::<Vec<_>>();
         loop {
             interval.tick().await;
             team_flags.reset();
+            let mut set = JoinSet::new();
+            let uncaptured_flags = Arc::new(Mutex::new(total_flags.clone().into_iter().collect::<HashMap<_,_>>()));
             for (check_name, check) in checks.iter() {
                 let name = check_name.clone();
                 let checkc = check.clone();
                 let team_points_clone = team_points.clone();
                 let team_flags_clone = team_flags.clone();
                 let teams_clone = teams.clone();
-                tokio::spawn(async move {
+                let uc_flags_clone = uncaptured_flags.clone();
+                set.spawn(async move {
                     if let Ok(Some(flag)) = check_for_flag(&checkc).await {
                         if let Some(team_name) = teams_clone.get(&flag) {
-                            team_points_clone.with_label_values(&[team_name.as_str(),&name.as_str()]).inc_by(checkc.points);
-                            team_flags_clone.with_label_values(&[team_name.as_str(),&checkc.difficulty]).inc();
+                            team_points_clone
+                                .with_label_values(&[team_name.as_str(), &name.as_str()])
+                                .inc_by(checkc.points);
+                            team_flags_clone
+                                .with_label_values(&[team_name.as_str(), &checkc.difficulty])
+                                .inc();
+                            let mut uc_flags = uc_flags_clone.lock().await;
+                            uc_flags.entry(checkc.difficulty).and_modify(|v| *v-=1);
                         }
                     }
                 });
+            }
+            set.join_all().await;
+            let uc_flags = uncaptured_flags.lock().await;
+            for (difficulty, num_flags) in uc_flags.iter() {
+                team_flags.with_label_values(&["Uncaptured", &difficulty.as_str()]).set(*num_flags);
             }
         }
     });
@@ -74,11 +96,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Deserialize,Clone)]
+#[derive(Deserialize, Clone)]
 struct Check {
     check: String,
     points: u64,
-    difficulty: String
+    difficulty: String,
 }
 
 async fn check_for_flag(check: &Check) -> Result<Option<String>> {
