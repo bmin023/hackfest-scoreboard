@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
 
     // build our application with a single route
     let app = Router::new().route(
-        "/",
+        "/metrics",
         get(|| async move {
             let metric_families = r.gather();
             let mut buffer = vec![];
