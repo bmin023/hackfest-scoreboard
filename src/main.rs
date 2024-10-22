@@ -4,8 +4,10 @@ use prometheus::Encoder;
 use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder};
 use serde::Deserialize;
 use serde_yaml;
+use tokio::task::JoinSet;
 use std::collections::HashMap;
 use std::fs::File;
+use std::sync::Arc;
 use tokio::time::{self, Duration};
 use tokio::{process::Command, time::timeout};
 
@@ -28,20 +30,27 @@ async fn main() -> Result<()> {
 
     let mut interval = time::interval(Duration::from_secs(3));
     tokio::spawn(async move {
-        let teams: HashMap<String, String> =
-            serde_yaml::from_reader(File::open("teams.yaml").unwrap()).unwrap();
-        let checks: HashMap<String, Check> =
-            serde_yaml::from_reader(File::open("checks.yaml").unwrap()).unwrap();
+        let teams: Arc<HashMap<String, String>> =
+            Arc::new(serde_yaml::from_reader(File::open("teams.yaml").unwrap()).unwrap());
+        let checks: Arc<HashMap<String, Check>> =
+            Arc::new(serde_yaml::from_reader(File::open("checks.yaml").unwrap()).unwrap());
         loop {
             interval.tick().await;
             team_flags.reset();
             for (check_name, check) in checks.iter() {
-                if let Ok(Some(flag)) = check_for_flag(&check).await {
-                    if let Some(team_name) = teams.get(&flag) {
-                        team_points.with_label_values(&[team_name.as_str(),&check_name.as_str()]).inc_by(check.points);
-                        team_flags.with_label_values(&[team_name.as_str(),&check.difficulty]).inc();
+                let name = check_name.clone();
+                let checkc = check.clone();
+                let team_points_clone = team_points.clone();
+                let team_flags_clone = team_flags.clone();
+                let teams_clone = teams.clone();
+                tokio::spawn(async move {
+                    if let Ok(Some(flag)) = check_for_flag(&checkc).await {
+                        if let Some(team_name) = teams_clone.get(&flag) {
+                            team_points_clone.with_label_values(&[team_name.as_str(),&name.as_str()]).inc_by(checkc.points);
+                            team_flags_clone.with_label_values(&[team_name.as_str(),&checkc.difficulty]).inc();
+                        }
                     }
-                }
+                });
             }
         }
     });
@@ -65,7 +74,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize,Clone)]
 struct Check {
     check: String,
     points: u64,
