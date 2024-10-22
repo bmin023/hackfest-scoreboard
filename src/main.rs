@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use axum::{routing::get, Router};
 use prometheus::Encoder;
-use prometheus::{IntCounterVec, Opts, Registry, TextEncoder};
+use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder};
 use serde::Deserialize;
 use serde_yaml;
 use std::collections::HashMap;
@@ -11,14 +11,20 @@ use tokio::{process::Command, time::timeout};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let counter = IntCounterVec::new(
+    let team_points = IntCounterVec::new(
         Opts::new("team_points", "How many points each team has"),
         &["team_name", "check_name"],
     )
     .unwrap();
 
+    let team_flags = IntGaugeVec::new(
+        Opts::new("team_flags", "How many flags does each team have"),
+        &["team_name", "difficulty"]
+    ).unwrap();
+
     let r = Registry::new();
-    r.register(Box::new(counter.clone())).unwrap();
+    r.register(Box::new(team_points.clone())).unwrap();
+    r.register(Box::new(team_flags.clone())).unwrap();
 
     let mut interval = time::interval(Duration::from_secs(3));
     tokio::spawn(async move {
@@ -28,10 +34,12 @@ async fn main() -> Result<()> {
             serde_yaml::from_reader(File::open("checks.yaml").unwrap()).unwrap();
         loop {
             interval.tick().await;
+            team_flags.reset();
             for (check_name, check) in checks.iter() {
                 if let Ok(Some(flag)) = check_for_flag(&check).await {
                     if let Some(team_name) = teams.get(&flag) {
-                        counter.with_label_values(&[team_name.as_str(),&check_name.as_str()]).inc_by(check.points);
+                        team_points.with_label_values(&[team_name.as_str(),&check_name.as_str()]).inc_by(check.points);
+                        team_flags.with_label_values(&[team_name.as_str(),&check.difficulty]).inc();
                     }
                 }
             }
@@ -50,6 +58,7 @@ async fn main() -> Result<()> {
         }),
     );
 
+    println!("Running");
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -60,6 +69,7 @@ async fn main() -> Result<()> {
 struct Check {
     check: String,
     points: u64,
+    difficulty: String
 }
 
 async fn check_for_flag(check: &Check) -> Result<Option<String>> {

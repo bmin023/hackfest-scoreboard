@@ -1,9 +1,12 @@
 flagtwo: 
   check: cat flag1.txt
   points: 1
+  difficulty: easy
 flagone: 
   check: cat flag2.txt
   points: 2
+  difficulty: easy
 flagthree: 
   check: cat flag3.txt
   points: 3
+  difficulty: hard
