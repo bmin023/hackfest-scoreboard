@@ -1,16 +1,20 @@
 use anyhow::{anyhow, Result};
 use axum::{routing::get, Router};
+use notify_debouncer_mini::{new_debouncer, notify, DebouncedEventKind};
 use prometheus::Encoder;
 use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder};
 use serde::Deserialize;
 use serde_yaml;
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
 use std::collections::HashMap;
 use std::fs::File;
+use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio::time::{self, Duration};
 use tokio::{process::Command, time::timeout};
+
+type CheckConfig = Arc<Mutex<HashMap<String, Check>>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -30,24 +34,60 @@ async fn main() -> Result<()> {
     r.register(Box::new(team_points.clone())).unwrap();
     r.register(Box::new(team_flags.clone())).unwrap();
 
-    let mut interval = time::interval(Duration::from_secs(3));
-    tokio::spawn(async move {
-        let teams: Arc<HashMap<String, String>> =
-            Arc::new(serde_yaml::from_reader(File::open("teams.yaml").unwrap()).unwrap());
-        let checks: Arc<HashMap<String, Check>> =
-            Arc::new(serde_yaml::from_reader(File::open("checks.yaml").unwrap()).unwrap());
-        let total_flags = checks.iter().fold(HashMap::new(), |mut m, (_, check)| {
+    let teams: Arc<HashMap<String, String>> =
+        Arc::new(serde_yaml::from_reader(File::open("teams.yaml").unwrap()).unwrap());
+    let checks: CheckConfig = get_check_config().await?;
+    let total_flags = checks
+        .lock()
+        .await
+        .iter()
+        .fold(HashMap::new(), |mut m, (_, check)| {
             m.entry(check.difficulty.clone())
                 .and_modify(|v| *v += 1)
                 .or_insert(1i64);
             m
-        }).into_iter().collect::<Vec<_>>();
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let checks = checks.clone();
+        let mut debouncer = new_debouncer(
+            Duration::from_secs(2),
+            move |res: notify_debouncer_mini::DebounceEventResult| {
+                match res {
+                    Ok(_) => { tx.send(0).unwrap(); },
+                    Err(e) => println!("Error {:?}", e),
+                }
+            },
+        )?;
+        tokio::task::spawn_blocking(move || {
+            println!("Watching for changes in {}", Path::new("checks.yaml").display());
+            debouncer.watcher().watch(Path::new("checks.yaml"), notify::RecursiveMode::NonRecursive).unwrap();
+            loop {}
+        });
+        tokio::task::spawn_blocking(move || {
+            loop {
+                let checks = checks.clone();
+                if rx.recv().is_ok() {
+                    tokio::spawn(async move { try_load_check_config(checks).await } )
+                } else {
+                    break;
+                };
+            };
+        });
+    }
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(3));
         loop {
             interval.tick().await;
             team_flags.reset();
             let mut set = JoinSet::new();
-            let uncaptured_flags = Arc::new(Mutex::new(total_flags.clone().into_iter().collect::<HashMap<_,_>>()));
-            for (check_name, check) in checks.iter() {
+            let uncaptured_flags = Arc::new(Mutex::new(
+                total_flags.clone().into_iter().collect::<HashMap<_, _>>(),
+            ));
+            for (check_name, check) in checks.lock().await.iter() {
                 let name = check_name.clone();
                 let checkc = check.clone();
                 let team_points_clone = team_points.clone();
@@ -64,7 +104,7 @@ async fn main() -> Result<()> {
                                 .with_label_values(&[team_name.as_str(), &checkc.difficulty])
                                 .inc();
                             let mut uc_flags = uc_flags_clone.lock().await;
-                            uc_flags.entry(checkc.difficulty).and_modify(|v| *v-=1);
+                            uc_flags.entry(checkc.difficulty).and_modify(|v| *v -= 1);
                         }
                     }
                 });
@@ -73,7 +113,9 @@ async fn main() -> Result<()> {
             let uc_flags = uncaptured_flags.lock().await;
             for (difficulty, num_flags) in uc_flags.iter() {
                 if *num_flags > 0 {
-                    team_flags.with_label_values(&["Uncaptured", &difficulty.as_str()]).set(*num_flags);
+                    team_flags
+                        .with_label_values(&["Uncaptured", &difficulty.as_str()])
+                        .set(*num_flags);
                 }
             }
         }
@@ -96,6 +138,29 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
     axum::serve(listener, app).await.unwrap();
     Ok(())
+}
+
+async fn get_check_config() -> Result<CheckConfig> {
+    let file = File::open("checks.yaml")?;
+    let checks: CheckConfig = Arc::new(Mutex::new(serde_yaml::from_reader(file)?));
+    Ok(checks)
+}
+
+// try to load config, if it fails, don't do anything
+async fn try_load_check_config(config: CheckConfig) {
+    let file = File::open("checks.yaml");
+    if let Ok(file) = file {
+        let checks: serde_yaml::Result<HashMap<String, Check>> = serde_yaml::from_reader(file);
+        if let Ok(checks) = checks {
+            let mut config = config.lock().await;
+            *config = checks;
+            println!("Config loaded");
+        } else {
+            println!("Syntax error in config");
+        }
+    } else {
+        println!("Failed to load config");
+    }
 }
 
 #[derive(Deserialize, Clone)]

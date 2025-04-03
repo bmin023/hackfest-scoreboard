@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.90"
 axum = "0.7.7"
+notify-debouncer-mini = "0.6.0"
 prometheus = "0.13.4"
 serde = { version = "1.0.210", features = ["derive"] }
 serde_yaml = "0.9.34"
