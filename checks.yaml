@@ -1,8 +1,8 @@
-flagtwo: 
+flagone: 
   check: cat flag1.txt
   points: 1
   difficulty: easy
-flagone: 
+flagtwo: 
   check: cat flag2.txt
   points: 2
   difficulty: easy

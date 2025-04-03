@@ -72,7 +72,9 @@ async fn main() -> Result<()> {
             set.join_all().await;
             let uc_flags = uncaptured_flags.lock().await;
             for (difficulty, num_flags) in uc_flags.iter() {
-                team_flags.with_label_values(&["Uncaptured", &difficulty.as_str()]).set(*num_flags);
+                if *num_flags > 0 {
+                    team_flags.with_label_values(&["Uncaptured", &difficulty.as_str()]).set(*num_flags);
+                }
             }
         }
     });
