@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use axum::{routing::get, Router};
 use notify_debouncer_mini::{new_debouncer, notify};
 use prometheus::Encoder;
-use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder};
+use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder };
 use serde::Deserialize;
 use serde_yaml;
 use std::collections::HashMap;
@@ -41,6 +41,12 @@ async fn main() -> Result<()> {
     )
     .unwrap();
 
+    let check_owners = IntGaugeVec::new(
+        Opts::new("check_owner", "Who owns the check"),
+        &["check_name", "team_name"],
+    )
+    .unwrap();
+
     let check_bounties = IntGaugeVec::new(
         Opts::new("check_bounties", "How much is the bounty for each check"),
         &["check_name"],
@@ -51,6 +57,7 @@ async fn main() -> Result<()> {
     r.register(Box::new(team_points.clone())).unwrap();
     r.register(Box::new(team_flags.clone())).unwrap();
     r.register(Box::new(team_bounties.clone())).unwrap();
+    r.register(Box::new(check_owners.clone())).unwrap();
     r.register(Box::new(check_bounties.clone())).unwrap();
 
     let teams: Arc<HashMap<String, String>> =
@@ -97,6 +104,7 @@ async fn main() -> Result<()> {
         owners.clone(),
         owner_rx,
         bounties.clone(),
+        check_owners.clone(),
         team_bounties.clone(),
         check_bounties.clone(),
     );
@@ -253,6 +261,7 @@ fn spawn_flag_change_watcher(
     owners: Arc<Mutex<HashMap<String, Option<String>>>>,
     mut owner_rx: mpsc::Receiver<(String, Option<String>)>,
     bounties: Arc<Mutex<HashMap<String, u64>>>,
+    check_owners: IntGaugeVec,
     team_bounties: IntGaugeVec,
     check_bounties: IntGaugeVec,
 ) {
@@ -261,9 +270,17 @@ fn spawn_flag_change_watcher(
             let mut owners = owners.lock().await;
             if let Some(current_owner) = owners.get_mut(&check_name) {
                 if *current_owner != new_owner {
+                    if let Some(current_owner) = current_owner.take() {
+                        check_owners
+                            .with_label_values(&[&check_name, current_owner.as_str()])
+                            .set(0);
+                    }
                     *current_owner = new_owner.clone();
                     if let Some(new_owner) = new_owner {
                         if let Some(bounty) = bounties.lock().await.get_mut(&check_name) {
+                            check_owners
+                                .with_label_values(&[&check_name, new_owner.as_str()])
+                                .set(1);
                             team_bounties
                                 .with_label_values(&[new_owner.as_str(), &check_name])
                                 .add(*bounty as i64);
